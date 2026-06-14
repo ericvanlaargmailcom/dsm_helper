@@ -1,0 +1,6 @@
+ocr
+keywatch
+__pycache__/
+*.pyc
+work/
+.DS_Store
