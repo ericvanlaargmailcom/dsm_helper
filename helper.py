@@ -197,6 +197,32 @@ def clear_key_cache() -> None:
         pass
 
 
+def read_azure_keyvault_secret(vault_name: str, secret_name: str) -> str:
+    if not vault_name or not secret_name:
+        return ""
+    proc = subprocess.run(
+        [
+            "az",
+            "keyvault",
+            "secret",
+            "show",
+            "--vault-name",
+            vault_name,
+            "--name",
+            secret_name,
+            "--query",
+            "value",
+            "-o",
+            "tsv",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "Could not read Azure Key Vault secret")
+    return proc.stdout.strip()
+
+
 def run_text(cmd: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, text=True, capture_output=True, check=check)
 
@@ -1057,6 +1083,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key", default=os.environ.get("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", "")))
     parser.add_argument("--no-key-cache", action="store_true", help="Do not read or write the temporary API key cache.")
     parser.add_argument("--clear-key-cache", action="store_true", help="Delete the cached API key and exit.")
+    parser.add_argument("--azure-keyvault-name", default=os.environ.get("AZURE_KEYVAULT_NAME", ""))
+    parser.add_argument("--azure-keyvault-secret-name", default=os.environ.get("AZURE_KEYVAULT_SECRET_NAME", ""))
     parser.add_argument("--model", default=os.environ.get("LLM_MODEL", DEFAULT_MODEL))
     parser.add_argument(
         "--provider",
@@ -1167,11 +1195,21 @@ def parse_args() -> argparse.Namespace:
         if args.api_key:
             print(f"{YELLOW}Using cached API key for this user.{RESET}")
         else:
-            print(f"{YELLOW}No API key found in this Terminal session.{RESET}")
-            args.api_key = getpass.getpass("Paste API key: ").strip()
-            if args.api_key and not args.no_key_cache:
-                write_key_cache(args.api_key)
-                print(f"{YELLOW}API key cached for future helper starts.{RESET}")
+            if args.azure_keyvault_name and args.azure_keyvault_secret_name:
+                print(f"{YELLOW}Reading API key from Azure Key Vault '{args.azure_keyvault_name}'.{RESET}")
+                args.api_key = read_azure_keyvault_secret(
+                    args.azure_keyvault_name,
+                    args.azure_keyvault_secret_name,
+                )
+                if args.api_key and not args.no_key_cache:
+                    write_key_cache(args.api_key)
+                    print(f"{YELLOW}API key cached for future helper starts.{RESET}")
+            else:
+                print(f"{YELLOW}No API key found in this Terminal session.{RESET}")
+                args.api_key = getpass.getpass("Paste API key: ").strip()
+                if args.api_key and not args.no_key_cache:
+                    write_key_cache(args.api_key)
+                    print(f"{YELLOW}API key cached for future helper starts.{RESET}")
         if not args.api_key:
             parser.error("No API key entered.")
     return args

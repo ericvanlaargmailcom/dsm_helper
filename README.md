@@ -37,6 +37,25 @@ and caches it in a user-only temporary file for future starts. Clear it with:
 ./helper.py --clear-key-cache
 ```
 
+## Azure Key Vault
+
+The helper can read the LLM API key from Azure Key Vault through the Azure CLI
+without Python packages:
+
+```sh
+az login
+az group create --name dsm-helper-rg --location westeurope
+az keyvault create --name <your-unique-vault-name> --resource-group dsm-helper-rg --location westeurope
+az keyvault secret set --vault-name <your-unique-vault-name> --name llm-api-key --value "<your-api-key>"
+export AZURE_KEYVAULT_NAME="<your-unique-vault-name>"
+export AZURE_KEYVAULT_SECRET_NAME="llm-api-key"
+./start_gpt55.sh
+```
+
+If the key is loaded from Key Vault, the helper caches it locally for future
+starts. Use `./helper.py --clear-key-cache` after rotating or replacing the
+secret.
+
 To skip the crosshairs and automatically capture the question area in the
 `Slimste Mens` window:
 
