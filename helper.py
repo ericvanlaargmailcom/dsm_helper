@@ -145,6 +145,10 @@ KNOWN_ANSWERS = [
         "Kir Royal/Slumdog Millionaire/All men are created equal",
     ),
     (
+        ("jacques d'ancona",),
+        "Theatercriticus/Henny Huisman/Recensent/Groninger/Journalist/Jurylid/Soundmixshow/Brillen",
+    ),
+    (
         ("volle", "hardrock", "site", "winnares the voice", "shop", "australië", "highway to hell", "angus"),
         "AC/DC/Web/Maan",
     ),
@@ -485,7 +489,7 @@ def round_instruction(round_type: str) -> str:
 
 
 def known_answer(text: str) -> str | None:
-    normalized = re.sub(r"\s+", " ", text.lower())
+    normalized = re.sub(r"\s+", " ", text.lower().replace("’", "'"))
     for required_terms, answer in KNOWN_ANSWERS:
         if all(term in normalized for term in required_terms):
             return answer
@@ -536,6 +540,8 @@ def build_prompt(
         "You are a fast answer helper for the Dutch/Belgian quiz show De Slimste Mens.\n"
         f"{round_instruction(detect_round_type(ocr_text))}\n"
         "For normal quiz questions, choose the canonical accepted quiz answer, not a list of plausible alternatives.\n"
+        "For Finale rounds, do not repeat answers already visible in the OCR text; focus on missing blurred slots.\n"
+        "For Finale rounds, if a missing blurred slot appears longer or multiword, prefer longer or multiword associations over short generic one-word guesses.\n"
         "For Puzzel rounds, infer hidden connector answers from the visible grid and output multiple remaining answers separated by /.\n"
         "For Puzzel rounds, each answer must connect at least two visible clues; prefer answers that connect three or four clues.\n"
         "For Puzzel rounds, do not output visible clue words themselves and do not output lower-level examples when an umbrella answer fits the grid.\n"
@@ -807,6 +813,32 @@ def filter_new_answers(answer: str, excluded_answers: list[str]) -> list[str]:
     return fresh
 
 
+def visible_answer_terms(ocr_text: str) -> list[str]:
+    terms = []
+    for match in re.findall(r"\b(?:20|40|60|100|120|200|300)\s+([A-ZÀ-ÖØ-Þ][\w'’+-]*(?:\s+[A-ZÀ-ÖØ-Þ][\w'’+-]*){0,3})", ocr_text):
+        cleaned = match.strip(" .,:;!?")
+        if cleaned:
+            terms.append(cleaned)
+    return terms
+
+
+def answer_text_contains(text: str, answer: str) -> bool:
+    text_key = answer_key(text)
+    candidate_key = answer_key(answer)
+    return bool(candidate_key and candidate_key in text_key)
+
+
+def filter_finale_answers(answer: str, ocr_text: str) -> list[str]:
+    excluded = visible_answer_terms(ocr_text)
+    normalized = ocr_text.casefold()
+    fresh = filter_new_answers(answer, excluded)
+    fresh = [item for item in fresh if not answer_text_contains(ocr_text, item)]
+    if "jacques d'ancona" in normalized or "jacques d’ancona" in normalized:
+        weak = {answer_key(item) for item in ("Idols", "Jury")}
+        fresh = [item for item in fresh if answer_key(item) not in weak]
+    return fresh
+
+
 def answer_visible_in_text(answer: str, text: str) -> bool:
     return answer_key(answer) in answer_key(text)
 
@@ -990,9 +1022,13 @@ def process_capture(args: argparse.Namespace, cancel_event: threading.Event | No
         print(f"{CYAN}OCR: {ocr_text}{RESET}")
         override = known_answer(ocr_text)
         if override:
-            if detect_round_type(ocr_text) == "puzzel":
+            round_type = detect_round_type(ocr_text)
+            if round_type == "puzzel":
                 fresh_override = filter_new_answers(override, PUZZLE_HISTORY)
                 queue_puzzle_answers(fresh_override)
+                override = "/".join(fresh_override) or override
+            elif round_type == "finale":
+                fresh_override = filter_finale_answers(override, ocr_text)
                 override = "/".join(fresh_override) or override
             check_cancel(cancel_event)
             print(f"{GREEN}Answer: {override} (known correction){RESET}")
@@ -1024,6 +1060,11 @@ def process_capture(args: argparse.Namespace, cancel_event: threading.Event | No
         prompt = build_prompt(reasoning_text, query, snippets, excluded_answers=excluded_answers)
         answer = call_llm(args, prompt)
         check_cancel(cancel_event)
+        if round_type == "finale":
+            finale_answers = filter_finale_answers(answer, ocr_text)
+            if finale_answers and len(finale_answers) != len(split_answers(answer)):
+                print(f"{YELLOW}Finale filtered visible/weak candidates: {answer} -> {'/'.join(finale_answers)}{RESET}")
+                answer = "/".join(finale_answers)
         if round_type == "puzzel":
             fresh_answers = filter_new_answers(answer, excluded_answers)
             if len(fresh_answers) < args.puzzle_answer_count:
