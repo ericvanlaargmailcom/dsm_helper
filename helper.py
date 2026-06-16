@@ -38,6 +38,8 @@ DEFAULT_MODEL = "gpt-4o-mini"
 KEY_CACHE_PATH = os.path.join(tempfile.gettempdir(), f"slimste_llm_api_key_{os.getuid()}")
 PUZZLE_HISTORY: list[str] = []
 PUZZLE_PENDING: list[str] = []
+FINALE_HISTORY: list[str] = []
+FINALE_SUBJECT = ""
 PROTECTED_SLASH_ANSWERS = [
     "AC/DC",
 ]
@@ -147,6 +149,10 @@ KNOWN_ANSWERS = [
     (
         ("jacques d'ancona",),
         "Theatercriticus/Henny Huisman/Recensent/Groninger/Journalist/Jurylid/Soundmixshow/Brillen",
+    ),
+    (
+        ("rembo & rembo",),
+        "VPRO/Villa Achterwerk/Televisieprogramma/Maxim Hartman/Theo Wesselo/Absurdistische humor",
     ),
     (
         ("volle", "hardrock", "site", "winnares the voice", "shop", "australië", "highway to hell", "angus"),
@@ -828,8 +834,39 @@ def answer_text_contains(text: str, answer: str) -> bool:
     return bool(candidate_key and candidate_key in text_key)
 
 
-def filter_finale_answers(answer: str, ocr_text: str) -> list[str]:
-    excluded = visible_answer_terms(ocr_text)
+def finale_subject(ocr_text: str) -> str:
+    match = re.search(r"wat weet je van\s+(.+?)(?:\?|$)", ocr_text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    subject = re.sub(r"\s+", " ", match.group(1)).strip(" .,:;!?")
+    return answer_key(subject)
+
+
+def reset_finale_state_if_needed(ocr_text: str) -> None:
+    global FINALE_SUBJECT
+    subject = finale_subject(ocr_text)
+    if subject and subject != FINALE_SUBJECT:
+        FINALE_SUBJECT = subject
+        FINALE_HISTORY.clear()
+
+
+def remember_finale_answers(answers: list[str]) -> None:
+    known = {answer_key(item) for item in FINALE_HISTORY}
+    for item in answers:
+        key = answer_key(item)
+        if key and key not in known:
+            FINALE_HISTORY.append(item)
+            known.add(key)
+    del FINALE_HISTORY[:-20]
+
+
+def update_finale_state_from_ocr(ocr_text: str) -> None:
+    reset_finale_state_if_needed(ocr_text)
+    remember_finale_answers(visible_answer_terms(ocr_text))
+
+
+def filter_finale_answers(answer: str, ocr_text: str, excluded_answers: list[str] | None = None) -> list[str]:
+    excluded = visible_answer_terms(ocr_text) + FINALE_HISTORY + (excluded_answers or [])
     normalized = ocr_text.casefold()
     fresh = filter_new_answers(answer, excluded)
     fresh = [item for item in fresh if not answer_text_contains(ocr_text, item)]
@@ -1020,30 +1057,44 @@ def process_capture(args: argparse.Namespace, cancel_event: threading.Event | No
 
         check_cancel(cancel_event)
         print(f"{CYAN}OCR: {ocr_text}{RESET}")
+        round_type = detect_round_type(ocr_text)
+        if round_type == "finale":
+            update_finale_state_from_ocr(ocr_text)
+            if FINALE_HISTORY:
+                print(f"{YELLOW}Finale excludes: {', '.join(FINALE_HISTORY)}{RESET}")
+
         override = known_answer(ocr_text)
         if override:
-            round_type = detect_round_type(ocr_text)
             if round_type == "puzzel":
                 fresh_override = filter_new_answers(override, PUZZLE_HISTORY)
                 queue_puzzle_answers(fresh_override)
                 override = "/".join(fresh_override) or override
             elif round_type == "finale":
                 fresh_override = filter_finale_answers(override, ocr_text)
-                override = "/".join(fresh_override) or override
+                if not fresh_override:
+                    print(f"{YELLOW}No new Finale answers to copy; visible answers were filtered out.{RESET}")
+                    return True
+                remember_finale_answers(fresh_override)
+                override = "/".join(fresh_override)
             check_cancel(cancel_event)
             print(f"{GREEN}Answer: {override} (known correction){RESET}")
             conveyor(override, args.conveyor_delay, args.sound)
             return True
 
-        round_type = detect_round_type(ocr_text)
         if round_type == "puzzel":
             update_puzzle_state_from_ocr(ocr_text)
-        excluded_answers = PUZZLE_HISTORY[:] if round_type == "puzzel" else []
+        excluded_answers = []
+        if round_type == "puzzel":
+            excluded_answers = PUZZLE_HISTORY[:]
+        elif round_type == "finale":
+            excluded_answers = FINALE_HISTORY[:]
         if excluded_answers:
-            print(f"{YELLOW}Puzzle excludes: {', '.join(excluded_answers)}{RESET}")
+            label = "Puzzle" if round_type == "puzzel" else "Finale"
+            print(f"{YELLOW}{label} excludes: {', '.join(excluded_answers)}{RESET}")
         reasoning_text = remove_answer_terms(ocr_text, excluded_answers) if excluded_answers else ocr_text
         if reasoning_text != ocr_text:
-            print(f"{YELLOW}Puzzle reasoning OCR: {reasoning_text}{RESET}")
+            label = "Puzzle" if round_type == "puzzel" else "Finale"
+            print(f"{YELLOW}{label} reasoning OCR: {reasoning_text}{RESET}")
 
         check_cancel(cancel_event)
         query = clean_query(reasoning_text)
@@ -1062,9 +1113,13 @@ def process_capture(args: argparse.Namespace, cancel_event: threading.Event | No
         check_cancel(cancel_event)
         if round_type == "finale":
             finale_answers = filter_finale_answers(answer, ocr_text)
-            if finale_answers and len(finale_answers) != len(split_answers(answer)):
+            if not finale_answers:
+                print(f"{YELLOW}No new Finale answers to copy; visible answers were filtered out.{RESET}")
+                return True
+            if len(finale_answers) != len(split_answers(answer)):
                 print(f"{YELLOW}Finale filtered visible/weak candidates: {answer} -> {'/'.join(finale_answers)}{RESET}")
                 answer = "/".join(finale_answers)
+            remember_finale_answers(finale_answers)
         if round_type == "puzzel":
             fresh_answers = filter_new_answers(answer, excluded_answers)
             if len(fresh_answers) < args.puzzle_answer_count:
