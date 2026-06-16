@@ -78,6 +78,8 @@ Only answers that appear in a later OCR scan as accepted are treated as
 confirmed exclusions; merely suggested puzzle answers stay pending. Web search
 is skipped for Puzzel by default because grid association puzzles are usually
 hurt more by slow or noisy search context. Use `--puzzle-search` to opt in.
+Slash-containing answers such as `AC/DC` are protected so they stay one
+clipboard item instead of being split as answer separators.
 
 For slower maximum accuracy:
 

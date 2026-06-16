@@ -38,6 +38,9 @@ DEFAULT_MODEL = "gpt-4o-mini"
 KEY_CACHE_PATH = os.path.join(tempfile.gettempdir(), f"slimste_llm_api_key_{os.getuid()}")
 PUZZLE_HISTORY: list[str] = []
 PUZZLE_PENDING: list[str] = []
+PROTECTED_SLASH_ANSWERS = [
+    "AC/DC",
+]
 RISKY_TERMS = [
     "aller tijden",
     "beste",
@@ -140,6 +143,14 @@ KNOWN_ANSWERS = [
     (
         ("cocktail", "champagne", "creme de cassis", "krantenjongen", "miljonair"),
         "Kir Royal/Slumdog Millionaire/All men are created equal",
+    ),
+    (
+        ("volle", "hardrock", "site", "winnares the voice", "shop", "australië", "highway to hell", "angus"),
+        "AC/DC/Web/Maan",
+    ),
+    (
+        ("volle", "hardrock", "site", "winnares the voice", "shop", "australie", "highway to hell", "angus"),
+        "AC/DC/Web/Maan",
     ),
 ]
 UI_WORDS = [
@@ -525,7 +536,9 @@ def build_prompt(
         "You are a fast answer helper for the Dutch/Belgian quiz show De Slimste Mens.\n"
         f"{round_instruction(detect_round_type(ocr_text))}\n"
         "For normal quiz questions, choose the canonical accepted quiz answer, not a list of plausible alternatives.\n"
-        "For Puzzel rounds, infer associations from the visible grid and output multiple remaining answers separated by /.\n"
+        "For Puzzel rounds, infer hidden connector answers from the visible grid and output multiple remaining answers separated by /.\n"
+        "For Puzzel rounds, each answer must connect at least two visible clues; prefer answers that connect three or four clues.\n"
+        "For Puzzel rounds, do not output visible clue words themselves and do not output lower-level examples when an umbrella answer fits the grid.\n"
         "For Puzzel rounds, never repeat answers that are already visible as accepted answers or listed as excluded.\n"
         "Use the provided search context when it conflicts with weak memory.\n"
         "Do not include thoughts, reasoning, XML tags, Markdown, introductions, explanations, or conversational filler.\n"
@@ -549,8 +562,9 @@ def build_retry_prompt(
     excluded = ", ".join(excluded_answers) or "none"
     return (
         "Your previous answer for a De Slimste Mens Puzzel round was incomplete or repeated an old answer.\n"
-        "Find different remaining puzzle answers from the visible grid.\n"
+        "Find different hidden connector answers from the visible grid.\n"
         f"Output exactly {needed_count} different remaining answers separated by / if possible.\n"
+        "Each answer must connect multiple visible clues. Do not output visible clue words themselves.\n"
         "Do not output the repeated answer or any excluded answer.\n"
         "Output ONLY raw answers, no explanation.\n\n"
         f"OCR text: {ocr_text}\n"
@@ -759,7 +773,21 @@ def sanitize_answer(answer: str) -> str:
 
 
 def split_answers(answer: str) -> list[str]:
-    return [part.strip() for part in answer.split("/") if part.strip()]
+    protected: dict[str, str] = {}
+    protected_answer = answer
+    for index, item in enumerate(PROTECTED_SLASH_ANSWERS):
+        token = f"__PROTECTED_SLASH_{index}__"
+        protected[token] = item
+        protected_answer = re.sub(re.escape(item), token, protected_answer, flags=re.IGNORECASE)
+
+    parts = []
+    for part in protected_answer.split("/"):
+        restored = part.strip()
+        for token, item in protected.items():
+            restored = restored.replace(token, item)
+        if restored:
+            parts.append(restored)
+    return parts
 
 
 def answer_key(answer: str) -> str:
